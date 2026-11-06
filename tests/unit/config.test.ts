@@ -2,7 +2,7 @@ import { inspect } from "node:util";
 
 import { describe, expect, it } from "vitest";
 
-import { loadConfig, redactConfig } from "../../src/index.js";
+import { createCalendarId, loadConfig, redactConfig } from "../../src/index.js";
 
 const iCloudEnvironment = {
   CALDAV_USERNAME: "user@example.com",
@@ -18,7 +18,28 @@ describe("loadConfig", () => {
     expect(config.transport).toBe("stdio");
     expect(config.port).toBe(8100);
     expect(config.requestTimeoutMs).toBe(30_000);
+    expect(config.allowedCalendarId).toBeUndefined();
   });
+
+  it("accepts a collection ID, not a display name", () => {
+    const id = createCalendarId("https://example.com/calendars/shared/");
+    expect(
+      loadConfig({ ...iCloudEnvironment, CALDAV_ALLOWED_CALENDAR_ID: id })
+        .allowedCalendarId,
+    ).toBe(id);
+  });
+
+  it.each(["", " ", "Shared", "https://example.com/calendars/shared/", "e30"])(
+    "rejects an invalid restriction without disabling it: %s",
+    (value) => {
+      expect(() =>
+        loadConfig({
+          ...iCloudEnvironment,
+          CALDAV_ALLOWED_CALENDAR_ID: value,
+        }),
+      ).toThrow();
+    },
+  );
 
   it("requires a URL for the generic provider", () => {
     expect(() =>

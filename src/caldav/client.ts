@@ -199,7 +199,76 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
     }
   };
 
+  const accessDenied = (): Error =>
+    createAppError({
+      code: "CALENDAR_ACCESS_DENIED",
+      message:
+        "Calendar access is restricted and the target cannot be authorized",
+    });
+
+  // IDs identify collection URLs, never display names. Do not fall back to a
+  // cached collection (or another collection) when discovery fails or changes.
+  const allowedCalendar = (snapshot: CalendarSnapshot): DAVCalendar => {
+    const { calendarUrl } = readCalendarId(config.allowedCalendarId ?? "");
+    const matches = snapshot.calendars.filter((calendar) =>
+      calendarUrlsEqual(calendar.url, calendarUrl),
+    );
+    const calendar = matches[0];
+    if (
+      matches.length !== 1 ||
+      calendar === undefined ||
+      createCalendarId(calendar.url) !== config.allowedCalendarId
+    ) {
+      throw accessDenied();
+    }
+    return calendar;
+  };
+
+  const assertResourceUrl = (
+    calendar: DAVCalendar,
+    resourceUrl: string,
+  ): void => {
+    if (config.allowedCalendarId === undefined) {
+      return;
+    }
+    const collection = new URL(calendar.url);
+    const resource = new URL(resourceUrl);
+    const path = collection.pathname.endsWith("/")
+      ? collection.pathname
+      : `${collection.pathname}/`;
+    const filename = resource.pathname.slice(path.length);
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(filename);
+    } catch {
+      throw accessDenied();
+    }
+    // Only canonical, immediate collection members are usable. In particular,
+    // encoded separators and nested/encoded traversal must not reach CalDAV.
+    if (
+      resource.href !== resourceUrl ||
+      resource.origin !== collection.origin ||
+      resource.username !== "" ||
+      resource.password !== "" ||
+      resource.search !== "" ||
+      resource.hash !== "" ||
+      !resource.pathname.startsWith(path) ||
+      decoded === "" ||
+      decoded === "." ||
+      decoded === ".." ||
+      /[\\/%]/.test(decoded)
+    ) {
+      throw accessDenied();
+    }
+  };
+
   const resolveCalendar = async (calendarId: string): Promise<DAVCalendar> => {
+    if (config.allowedCalendarId !== undefined) {
+      if (calendarId !== config.allowedCalendarId) {
+        throw accessDenied();
+      }
+      return allowedCalendar(await discoverCalendars());
+    }
     const handle = readCalendarId(calendarId);
     const cachedSnapshot = calendarSnapshot;
     const cachedCalendar =
@@ -235,7 +304,11 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
   const listCalendars = (): Promise<readonly CalendarInfo[]> =>
     protect(async () => {
       const snapshot = await discoverCalendars();
-      return snapshot.calendars.map((calendar) => ({
+      const calendars =
+        config.allowedCalendarId === undefined
+          ? snapshot.calendars
+          : [allowedCalendar(snapshot)];
+      return calendars.map((calendar) => ({
         calendarId: createCalendarId(calendar.url),
         displayName: calendarDisplayName(calendar),
         description: calendarDescription(calendar),
@@ -256,7 +329,10 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
       expand: false,
       useMultiGet: true,
     });
-    return resources.map((resource) => toResource(calendar, resource));
+    return resources.map((resource) => {
+      assertResourceUrl(calendar, resource.url);
+      return toResource(calendar, resource);
+    });
   };
 
   const listResources = (
@@ -274,12 +350,16 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
       const calendar = await resolveCalendar(
         createCalendarId(handle.calendarUrl),
       );
+      assertResourceUrl(calendar, handle.resourceUrl);
       let resources: readonly CalendarResource[];
       try {
         resources = await fetchResources(calendar, undefined, [
           handle.resourceUrl,
         ]);
-      } catch {
+      } catch (cause) {
+        if (isAppError(cause) && cause.code === "CALENDAR_ACCESS_DENIED") {
+          throw cause;
+        }
         resources = await fetchResources(calendar);
       }
       const resource = resources.find(
@@ -301,13 +381,20 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
   ): Promise<CalendarResource> =>
     protect(async () => {
       const calendar = await resolveCalendar(calendarId);
+      if (
+        config.allowedCalendarId !== undefined &&
+        (filename === "" || /[\\/%?#]/.test(decodeURIComponent(filename)))
+      ) {
+        throw accessDenied();
+      }
+      const resourceUrl = new URL(filename, calendar.url).href;
+      assertResourceUrl(calendar, resourceUrl);
       const response = await client.createCalendarObject({
         calendar,
         filename,
         iCalString: data,
       });
       assertSuccessfulResponse(response);
-      const resourceUrl = new URL(filename, calendar.url).href;
       const resources = await fetchResources(calendar, undefined, [
         resourceUrl,
       ]);
@@ -326,6 +413,7 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
     data: string,
   ): Promise<CalendarResource> =>
     protect(async () => {
+      await authorizeWrite(resource);
       const response = await client.updateCalendarObject({
         calendarObject: {
           url: resource.url,
@@ -339,6 +427,7 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
 
   const deleteResource = (resource: CalendarResource): Promise<void> =>
     protect(async () => {
+      await authorizeWrite(resource);
       const response = await client.deleteCalendarObject({
         calendarObject: {
           url: resource.url,
@@ -348,6 +437,21 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
       });
       assertSuccessfulResponse(response);
     });
+
+  const authorizeWrite = async (resource: CalendarResource): Promise<void> => {
+    if (config.allowedCalendarId === undefined) {
+      return;
+    }
+    const calendar = await resolveCalendar(resource.calendarId);
+    const handle = readResourceId(resource.resourceId);
+    if (
+      createCalendarId(handle.calendarUrl) !== config.allowedCalendarId ||
+      handle.resourceUrl !== resource.url
+    ) {
+      throw accessDenied();
+    }
+    assertResourceUrl(calendar, resource.url);
+  };
 
   return {
     listCalendars,

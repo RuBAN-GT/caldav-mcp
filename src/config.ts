@@ -2,6 +2,8 @@ import { inspect } from "node:util";
 
 import { z } from "zod";
 
+import { readCalendarId } from "./caldav/resource-handle.js";
+
 const optionalUrlSchema = z.preprocess(
   (value) => (value === "" ? undefined : value),
   z.url().optional(),
@@ -13,6 +15,18 @@ const environmentSchema = z
     CALDAV_URL: optionalUrlSchema,
     CALDAV_USERNAME: z.string().min(1),
     CALDAV_PASSWORD: z.string().min(1),
+    CALDAV_ALLOWED_CALENDAR_ID: z
+      .string()
+      .min(1)
+      .refine((value) => {
+        try {
+          readCalendarId(value);
+          return true;
+        } catch {
+          return false;
+        }
+      }, "CALDAV_ALLOWED_CALENDAR_ID must be a calendar_id from list_calendars")
+      .optional(),
     CALDAV_MCP_TRANSPORT: z.enum(["stdio", "streamable-http"]).default("stdio"),
     CALDAV_MCP_HOST: z.string().min(1).default("0.0.0.0"),
     CALDAV_MCP_PORT: z.coerce.number().int().min(1).max(65_535).default(8100),
@@ -41,6 +55,7 @@ export type AppConfig = {
   readonly url: string;
   readonly username: string;
   readonly password: string;
+  readonly allowedCalendarId?: string;
   readonly transport: "stdio" | "streamable-http";
   readonly host: string;
   readonly port: number;
@@ -63,6 +78,9 @@ export const loadConfig = (
     url: parsed.CALDAV_URL ?? defaultICloudUrl,
     username: parsed.CALDAV_USERNAME,
     password: parsed.CALDAV_PASSWORD,
+    ...(parsed.CALDAV_ALLOWED_CALENDAR_ID === undefined
+      ? {}
+      : { allowedCalendarId: parsed.CALDAV_ALLOWED_CALENDAR_ID }),
     transport: parsed.CALDAV_MCP_TRANSPORT,
     host: parsed.CALDAV_MCP_HOST,
     port: parsed.CALDAV_MCP_PORT,
