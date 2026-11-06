@@ -74,8 +74,8 @@ const eventInput = {
 const close: Array<() => Promise<void>> = [];
 type ToolCase = [string, Record<string, unknown>];
 
-const connect = async () => {
-  const gateway = createCalDavGateway(config);
+const connect = async (settings = config) => {
+  const gateway = createCalDavGateway(settings);
   const service = createCalendarService(
     gateway,
     iCloudProviderPolicy,
@@ -107,6 +107,123 @@ beforeEach(() => {
   ]) {
     write.mockResolvedValue(new Response(null, { status: 204 }));
   }
+});
+
+describe("multiple-calendar MCP access", () => {
+  const multiConfig = loadConfig({
+    CALDAV_USERNAME: "test@example.com",
+    CALDAV_PASSWORD: "test",
+    CALDAV_ALLOWED_CALENDAR_ID: `${id}, ${otherId}`,
+  });
+
+  it("lists only allowed collections and supports CRUD and UID lookups in both", async () => {
+    const hiddenUrl = "https://p01-caldav.icloud.com/123/calendars/hidden/";
+    dav.fetchCalendars.mockResolvedValue([
+      calendar,
+      otherCalendar,
+      { url: hiddenUrl },
+    ]);
+    dav.fetchCalendarObjects.mockImplementation(({ calendar: target }) =>
+      Promise.resolve([{ url: `${target.url}event.ics`, data, etag: '"1"' }]),
+    );
+    const client = await connect(multiConfig);
+    const listing = await client.callTool({
+      name: "list_calendars",
+      arguments: {},
+    });
+    expect(listing.isError).not.toBe(true);
+    expect(listing.structuredContent).toMatchObject({
+      calendars: [{ calendar_id: id }, { calendar_id: otherId }],
+    });
+    expect(JSON.stringify(listing)).not.toContain(createCalendarId(hiddenUrl));
+    for (const target of [url, otherUrl]) {
+      const calendarId = createCalendarId(target);
+      const eventId = createResourceId(target, `${target}event.ics`);
+      for (const [name, args] of [
+        ["list_events", { calendar_id: calendarId, ...range }],
+        ["get_event", { resource_id: eventId }],
+        ["get_event", { calendar_id: calendarId, uid: "shared-uid" }],
+        ["create_event", { calendar_id: calendarId, ...eventInput }],
+        [
+          "update_event",
+          {
+            calendar_id: calendarId,
+            uid: "shared-uid",
+            patch: { summary: "Updated" },
+          },
+        ],
+        ["delete_event", { resource_id: eventId }],
+      ] satisfies ToolCase[]) {
+        const result = await client.callTool({ name, arguments: args });
+        expect(result.isError, JSON.stringify(result)).not.toBe(true);
+      }
+    }
+    for (const [name, args] of [
+      ["list_events", { calendar_id: createCalendarId(hiddenUrl), ...range }],
+      [
+        "get_event",
+        { calendar_id: createCalendarId(hiddenUrl), uid: "shared-uid" },
+      ],
+      [
+        "get_event",
+        { resource_id: createResourceId(url, `${hiddenUrl}event.ics`) },
+      ],
+      [
+        "update_event",
+        {
+          resource_id: createResourceId(hiddenUrl, `${hiddenUrl}event.ics`),
+          patch: { summary: "Blocked" },
+        },
+      ],
+      [
+        "delete_event",
+        { calendar_id: createCalendarId(hiddenUrl), uid: "shared-uid" },
+      ],
+      [
+        "create_event",
+        { calendar_id: createCalendarId(hiddenUrl), ...eventInput },
+      ],
+    ] satisfies ToolCase[]) {
+      expect((await client.callTool({ name, arguments: args })).isError).toBe(
+        true,
+      );
+    }
+    expect(dav.createCalendarObject).toHaveBeenCalledTimes(2);
+    expect(dav.updateCalendarObject).toHaveBeenCalledTimes(2);
+    expect(dav.deleteCalendarObject).toHaveBeenCalledTimes(2);
+    for (const [request] of dav.fetchCalendarObjects.mock.calls) {
+      expect([url, otherUrl]).toContain(request.calendar.url);
+    }
+  });
+
+  it.each([
+    { calendars: [calendar] },
+    { calendars: [calendar, { ...otherCalendar, url: `${otherUrl}changed/` }] },
+    { calendars: [calendar, otherCalendar, otherCalendar] },
+  ])(
+    "blocks even the remaining calendar when any entry fails: %j",
+    async ({ calendars }) => {
+      const gateway = createCalDavGateway(multiConfig);
+      await gateway.listCalendars();
+      dav.fetchCalendars.mockResolvedValue(calendars);
+      for (const operation of [
+        () => gateway.listCalendars(),
+        () => gateway.listResources(id),
+        () => gateway.getResource(resourceId),
+        () => gateway.createResource(id, "event.ics", data),
+        () => gateway.updateResource(resource, data),
+        () => gateway.deleteResource(resource),
+      ]) {
+        await expect(operation()).rejects.toMatchObject({
+          code: "CALENDAR_ACCESS_DENIED",
+        });
+      }
+      expect(dav.fetchCalendarObjects).not.toHaveBeenCalled();
+      expect(dav.createCalendarObject).not.toHaveBeenCalled();
+      expect(dav.updateCalendarObject).not.toHaveBeenCalled();
+      expect(dav.deleteCalendarObject).not.toHaveBeenCalled();
+    },
+  );
 });
 afterEach(async () => {
   for (const cleanup of close.splice(0)) await cleanup();

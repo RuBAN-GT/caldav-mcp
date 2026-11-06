@@ -392,18 +392,18 @@ CALDAV_MCP_TRANSPORT=streamable-http pnpm start
 
 All settings use the `CALDAV_` or `CALDAV_MCP_` prefix.
 
-| Variable                        | Required | Default                     | Description                                                                         |
-| ------------------------------- | -------- | --------------------------- | ----------------------------------------------------------------------------------- |
-| `CALDAV_PROVIDER`               | No       | `icloud`                    | Provider policy. iCloud is the supported profile.                                   |
-| `CALDAV_URL`                    | No       | `https://caldav.icloud.com` | CalDAV discovery URL.                                                               |
-| `CALDAV_USERNAME`               | Yes      | None                        | Apple Account email.                                                                |
-| `CALDAV_PASSWORD`               | Yes      | None                        | App-specific password, not the account password.                                    |
-| `CALDAV_ALLOWED_CALENDAR_ID`    | No       | Unrestricted                | Exact opaque collection `calendar_id` from `list_calendars`; never a calendar name. |
-| `CALDAV_MCP_TRANSPORT`          | No       | `stdio`                     | `stdio` or `streamable-http`.                                                       |
-| `CALDAV_MCP_HOST`               | No       | `0.0.0.0`                   | HTTP bind address.                                                                  |
-| `CALDAV_MCP_PORT`               | No       | `8100`                      | HTTP listening port.                                                                |
-| `CALDAV_MCP_LOG_LEVEL`          | No       | `INFO`                      | Application log level.                                                              |
-| `CALDAV_MCP_REQUEST_TIMEOUT_MS` | No       | `30000`                     | CalDAV request timeout.                                                             |
+| Variable                        | Required | Default                     | Description                                                                                 |
+| ------------------------------- | -------- | --------------------------- | ------------------------------------------------------------------------------------------- |
+| `CALDAV_PROVIDER`               | No       | `icloud`                    | Provider policy. iCloud is the supported profile.                                           |
+| `CALDAV_URL`                    | No       | `https://caldav.icloud.com` | CalDAV discovery URL.                                                                       |
+| `CALDAV_USERNAME`               | Yes      | None                        | Apple Account email.                                                                        |
+| `CALDAV_PASSWORD`               | Yes      | None                        | App-specific password, not the account password.                                            |
+| `CALDAV_ALLOWED_CALENDAR_ID`    | No       | Unrestricted                | One or more exact `calendar_id` values from `list_calendars`, comma-separated; never names. |
+| `CALDAV_MCP_TRANSPORT`          | No       | `stdio`                     | `stdio` or `streamable-http`.                                                               |
+| `CALDAV_MCP_HOST`               | No       | `0.0.0.0`                   | HTTP bind address.                                                                          |
+| `CALDAV_MCP_PORT`               | No       | `8100`                      | HTTP listening port.                                                                        |
+| `CALDAV_MCP_LOG_LEVEL`          | No       | `INFO`                      | Application log level.                                                                      |
+| `CALDAV_MCP_REQUEST_TIMEOUT_MS` | No       | `30000`                     | CalDAV request timeout.                                                                     |
 
 The core retains an experimental `generic` provider policy and configurable URL to keep
 Apple extensions isolated from the shared iCalendar implementation. No compatibility
@@ -412,18 +412,31 @@ with other providers is currently claimed.
 Secrets must be supplied through the deployment platform or environment. Never commit
 `.env`, pass credentials as MCP tool arguments, or include them in diagnostic reports.
 
-### Restrict access to one iCloud calendar (including shared calendars)
+### Restrict access to selected iCloud calendars (including shared calendars)
 
 1. In a **trusted, temporary local MCP connection**, leave
    `CALDAV_ALLOWED_CALENDAR_ID` unset and call `list_calendars`. Do not connect this
    unrestricted instance to Hermes or another untrusted client.
-2. Copy the exact `calendar_id` of the desired collection. This opaque ID encodes
+2. Copy the exact `calendar_id` of each desired collection. This opaque ID encodes
    the CalDAV collection URL, not its display name; renaming the calendar does
    not change the restriction. Shared calendars must already be accessible to
    the configured Apple Account, with write permission if writes are needed.
 3. Stop the temporary instance. Set the variable and restart the server. Check
-   that `list_calendars` returns exactly the intended calendar before connecting
+   that `list_calendars` returns exactly the intended calendars before connecting
    Hermes. Never automatically discover a replacement ID by calendar name.
+
+Use the same variable for one calendar or a comma-separated allowlist:
+
+```dotenv
+# One calendar:
+CALDAV_ALLOWED_CALENDAR_ID=<calendar_id_1>
+# Or multiple calendars (replace the line above):
+CALDAV_ALLOWED_CALENDAR_ID=<calendar_id_1>,<calendar_id_2>
+```
+
+Whitespace around IDs is ignored and duplicate IDs are deduplicated. Empty
+entries (including a trailing comma) or any malformed ID reject the entire
+configuration; they never disable the restriction.
 
 For example, build **this fork**, rather than using the upstream image (which
 does not include this restriction):
@@ -448,11 +461,12 @@ to use the Streamable HTTP endpoint `http://caldav-mcp:8100/mcp`. No host port
 needs to be published. Do not give Hermes the Apple credentials, the MCP
 container's environment/filesystem, or access to the Docker socket.
 
-With the restriction set, all six tools are scoped to this collection, including
+With the restriction set, all six tools are scoped to these collections, including
 UID lookups, raw iCalendar reads, recurring-event handles, and writes. Forged or
 previously obtained IDs for other calendars cannot grant access. Discovery is
 rechecked before every event operation and immediately before update/delete;
-missing, changed or ambiguous collections and discovery failures block access
+if **any** allowed collection is missing, changed or ambiguous, or discovery fails,
+**all** calendar access is blocked, including otherwise valid allowlist entries,
 without using cached permissions or falling back to another calendar. Blank or
 malformed values fail configuration validation. **Only an absent variable disables
 the restriction** and preserves the original account-wide behavior.

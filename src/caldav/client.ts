@@ -208,27 +208,37 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
 
   // IDs identify collection URLs, never display names. Do not fall back to a
   // cached collection (or another collection) when discovery fails or changes.
-  const allowedCalendar = (snapshot: CalendarSnapshot): DAVCalendar => {
-    const { calendarUrl } = readCalendarId(config.allowedCalendarId ?? "");
-    const matches = snapshot.calendars.filter((calendar) =>
-      calendarUrlsEqual(calendar.url, calendarUrl),
-    );
-    const calendar = matches[0];
-    if (
-      matches.length !== 1 ||
-      calendar === undefined ||
-      createCalendarId(calendar.url) !== config.allowedCalendarId
-    ) {
+  const allowedCalendars = (
+    snapshot: CalendarSnapshot,
+  ): readonly DAVCalendar[] => {
+    const ids = config.allowedCalendarIds;
+    if (ids === undefined || ids.length === 0) {
       throw accessDenied();
     }
-    return calendar;
+    // Validate the whole allowlist before returning any calendar: a missing or
+    // ambiguous entry must not silently turn into a partially applied policy.
+    return ids.map((id) => {
+      const { calendarUrl } = readCalendarId(id);
+      const matches = snapshot.calendars.filter((calendar) =>
+        calendarUrlsEqual(calendar.url, calendarUrl),
+      );
+      const calendar = matches[0];
+      if (
+        matches.length !== 1 ||
+        calendar === undefined ||
+        createCalendarId(calendar.url) !== id
+      ) {
+        throw accessDenied();
+      }
+      return calendar;
+    });
   };
 
   const assertResourceUrl = (
     calendar: DAVCalendar,
     resourceUrl: string,
   ): void => {
-    if (config.allowedCalendarId === undefined) {
+    if (config.allowedCalendarIds === undefined) {
       return;
     }
     const collection = new URL(calendar.url);
@@ -263,11 +273,17 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
   };
 
   const resolveCalendar = async (calendarId: string): Promise<DAVCalendar> => {
-    if (config.allowedCalendarId !== undefined) {
-      if (calendarId !== config.allowedCalendarId) {
+    if (config.allowedCalendarIds !== undefined) {
+      if (!config.allowedCalendarIds.includes(calendarId)) {
         throw accessDenied();
       }
-      return allowedCalendar(await discoverCalendars());
+      const calendar = allowedCalendars(await discoverCalendars()).find(
+        (candidate) => createCalendarId(candidate.url) === calendarId,
+      );
+      if (calendar === undefined) {
+        throw accessDenied();
+      }
+      return calendar;
     }
     const handle = readCalendarId(calendarId);
     const cachedSnapshot = calendarSnapshot;
@@ -305,9 +321,9 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
     protect(async () => {
       const snapshot = await discoverCalendars();
       const calendars =
-        config.allowedCalendarId === undefined
+        config.allowedCalendarIds === undefined
           ? snapshot.calendars
-          : [allowedCalendar(snapshot)];
+          : allowedCalendars(snapshot);
       return calendars.map((calendar) => ({
         calendarId: createCalendarId(calendar.url),
         displayName: calendarDisplayName(calendar),
@@ -382,7 +398,7 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
     protect(async () => {
       const calendar = await resolveCalendar(calendarId);
       if (
-        config.allowedCalendarId !== undefined &&
+        config.allowedCalendarIds !== undefined &&
         (filename === "" || /[\\/%?#]/.test(decodeURIComponent(filename)))
       ) {
         throw accessDenied();
@@ -439,13 +455,13 @@ export const createCalDavGateway = (config: AppConfig): CalDavGateway => {
     });
 
   const authorizeWrite = async (resource: CalendarResource): Promise<void> => {
-    if (config.allowedCalendarId === undefined) {
+    if (config.allowedCalendarIds === undefined) {
       return;
     }
     const calendar = await resolveCalendar(resource.calendarId);
     const handle = readResourceId(resource.resourceId);
     if (
-      createCalendarId(handle.calendarUrl) !== config.allowedCalendarId ||
+      createCalendarId(handle.calendarUrl) !== resource.calendarId ||
       handle.resourceUrl !== resource.url
     ) {
       throw accessDenied();

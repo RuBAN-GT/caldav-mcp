@@ -18,15 +18,15 @@ describe("loadConfig", () => {
     expect(config.transport).toBe("stdio");
     expect(config.port).toBe(8100);
     expect(config.requestTimeoutMs).toBe(30_000);
-    expect(config.allowedCalendarId).toBeUndefined();
+    expect(config.allowedCalendarIds).toBeUndefined();
   });
 
   it("accepts a collection ID, not a display name", () => {
     const id = createCalendarId("https://example.com/calendars/shared/");
     expect(
       loadConfig({ ...iCloudEnvironment, CALDAV_ALLOWED_CALENDAR_ID: id })
-        .allowedCalendarId,
-    ).toBe(id);
+        .allowedCalendarIds,
+    ).toEqual([id]);
   });
 
   it.each(["", " ", "Shared", "https://example.com/calendars/shared/", "e30"])(
@@ -36,6 +36,30 @@ describe("loadConfig", () => {
         loadConfig({
           ...iCloudEnvironment,
           CALDAV_ALLOWED_CALENDAR_ID: value,
+        }),
+      ).toThrow();
+    },
+  );
+
+  it("parses comma-separated IDs, trims whitespace and deduplicates", () => {
+    const first = createCalendarId("https://example.com/calendars/first/");
+    const second = createCalendarId("https://example.com/calendars/second/");
+    expect(
+      loadConfig({
+        ...iCloudEnvironment,
+        CALDAV_ALLOWED_CALENDAR_ID: ` ${first}, ${second} , ${first} `,
+      }).allowedCalendarIds,
+    ).toEqual([first, second]);
+  });
+
+  it.each([",", "{id},", ",{id}", "{id}, ,{id}", "{id},Shared"])(
+    "rejects the entire list for empty or malformed entries: %s",
+    (value) => {
+      const id = createCalendarId("https://example.com/calendars/shared/");
+      expect(() =>
+        loadConfig({
+          ...iCloudEnvironment,
+          CALDAV_ALLOWED_CALENDAR_ID: value.replaceAll("{id}", id),
         }),
       ).toThrow();
     },

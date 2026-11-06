@@ -17,15 +17,23 @@ const environmentSchema = z
     CALDAV_PASSWORD: z.string().min(1),
     CALDAV_ALLOWED_CALENDAR_ID: z
       .string()
-      .min(1)
-      .refine((value) => {
-        try {
-          readCalendarId(value);
-          return true;
-        } catch {
-          return false;
-        }
-      }, "CALDAV_ALLOWED_CALENDAR_ID must be a calendar_id from list_calendars")
+      .transform((value) => value.split(",").map((id) => id.trim()))
+      .pipe(
+        z.array(
+          z
+            .string()
+            .min(1)
+            .refine((value) => {
+              try {
+                readCalendarId(value);
+                return true;
+              } catch {
+                return false;
+              }
+            }, "CALDAV_ALLOWED_CALENDAR_ID entries must be calendar_ids from list_calendars"),
+        ),
+      )
+      .transform((ids) => [...new Set(ids)])
       .optional(),
     CALDAV_MCP_TRANSPORT: z.enum(["stdio", "streamable-http"]).default("stdio"),
     CALDAV_MCP_HOST: z.string().min(1).default("0.0.0.0"),
@@ -55,7 +63,7 @@ export type AppConfig = {
   readonly url: string;
   readonly username: string;
   readonly password: string;
-  readonly allowedCalendarId?: string;
+  readonly allowedCalendarIds?: readonly string[];
   readonly transport: "stdio" | "streamable-http";
   readonly host: string;
   readonly port: number;
@@ -80,7 +88,7 @@ export const loadConfig = (
     password: parsed.CALDAV_PASSWORD,
     ...(parsed.CALDAV_ALLOWED_CALENDAR_ID === undefined
       ? {}
-      : { allowedCalendarId: parsed.CALDAV_ALLOWED_CALENDAR_ID }),
+      : { allowedCalendarIds: parsed.CALDAV_ALLOWED_CALENDAR_ID }),
     transport: parsed.CALDAV_MCP_TRANSPORT,
     host: parsed.CALDAV_MCP_HOST,
     port: parsed.CALDAV_MCP_PORT,
